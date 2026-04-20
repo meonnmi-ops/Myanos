@@ -37,7 +37,8 @@ logger = logging.getLogger('myanos.ai')
 
 # Ollama (local, free, offline)
 OLLAMA_BASE_URL = os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434')
-OLLAMA_DEFAULT_MODEL = os.environ.get('OLLAMA_MODEL', 'llama3.2')
+OLLAMA_DEFAULT_MODEL = os.environ.get('OLLAMA_MODEL', 'myanmar-seallm')  # Myanmar SeaLLM (best for Burmese)
+OLLAMA_FALLBACK_MODEL = 'llama3.2'  # Fallback if Myanmar model not installed
 
 # HuggingFace Inference API (free tier, no cost)
 HF_API_URL = 'https://api-inference.huggingface.co/models/'
@@ -395,16 +396,28 @@ def get_active_backend():
 
 
 def get_all_backend_status():
-    """Get status of all backends."""
+    """Get status of all backends, including which Ollama model is loaded."""
     status = {}
     for name in BACKEND_PRIORITY:
+        model_name = {
+            'ollama': OLLAMA_DEFAULT_MODEL,
+            'huggingface': HF_DEFAULT_MODEL,
+            'groq': GROQ_DEFAULT_MODEL,
+        }.get(name, '')
+
+        # For Ollama, check if Myanmar model is actually installed
+        if name == 'ollama' and _check_backend_status('ollama'):
+            try:
+                installed = _ollama_list_models()
+                installed_names = [m['name'] for m in installed]
+                if OLLAMA_DEFAULT_MODEL not in installed_names and OLLAMA_FALLBACK_MODEL in installed_names:
+                    model_name = f'{OLLAMA_DEFAULT_MODEL} (not found, fallback: {OLLAMA_FALLBACK_MODEL})'
+            except Exception:
+                pass
+
         status[name] = {
             'available': _check_backend_status(name),
-            'model': {
-                'ollama': OLLAMA_DEFAULT_MODEL,
-                'huggingface': HF_DEFAULT_MODEL,
-                'groq': GROQ_DEFAULT_MODEL,
-            }.get(name, ''),
+            'model': model_name,
         }
     return status
 
