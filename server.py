@@ -33,11 +33,12 @@ from datetime import datetime
 from collections import defaultdict
 from threading import Thread
 import atexit
+import pymysql  # For TiDB connection
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
 DESKTOP_DIR = BASE_DIR / "desktop"
-VERSION = "4.3.0"
+VERSION = "5.0.0"
 DEFAULT_PORT = 8080
 API_KEY_FILE = BASE_DIR / ".myanos_api_key"
 PASSWORD_FILE = BASE_DIR / ".myanos_password"
@@ -160,6 +161,30 @@ class MyanosHandler(SimpleHTTPRequestHandler):
             self.handle_password_change(data)
             return
 
+        # AI endpoints (rate-limited but no API key needed)
+        if self.path == '/api/ai-chat':
+            if self._check_rate_limit():
+                self.handle_ai_chat(data)
+            return
+        if self.path == '/api/code-execute':
+            if self._check_rate_limit():
+                self.handle_code_execute(data)
+            return
+        if self.path == '/api/code-execute-viz':
+            if self._check_rate_limit():
+                self.handle_code_execute_viz(data)
+            return
+
+        # Database endpoints (rate-limited, no API key)
+        if self.path == '/api/db/query':
+            if self._check_rate_limit():
+                self.handle_db_query(data)
+            return
+        if self.path.startswith('/api/db/'):
+            if self._check_rate_limit():
+                self.handle_db_endpoint(data, self.path)
+            return
+
         # Auth-required endpoints
         if not self._check_auth():
             return
@@ -202,7 +227,15 @@ class MyanosHandler(SimpleHTTPRequestHandler):
                 'version': VERSION,
                 'uptime': time.time() - _server_start_time,
                 'python': platform.python_version(),
+                'db': _db_health_cache,
+                'ai': 'forge.manus.im' if os.environ.get('FORGE_API_KEY') else 'not configured',
             })
+        elif self.path == '/api/db/health':
+            self.handle_db_health()
+        elif self.path == '/api/db/users':
+            self.handle_db_list_users()
+        elif self.path == '/api/heartbeat':
+            self.handle_heartbeat()
         else:
             super().do_GET()
 
@@ -887,6 +920,334 @@ class MyanosHandler(SimpleHTTPRequestHandler):
         }
         return icons.get(name, '📦')
 
+    # ─── API: AI Chat (forge.manus.im) ──────────────────────────────────
+    def handle_ai_chat(self, data):
+        """Real AI chat using Manus.im Forge API (Gemini 2.5 Flash)
+        Ported from colab-mobile-ai/server/routers.ts aiTeacher.chat"""
+        try:
+            from ai_llm import invoke_llm, extract_response_text, MYANAI_SYSTEM_PROMPT
+
+            messages = data.get('messages', [])
+            backend = data.get('backend', 'auto')
+            api_key_override = data.get('api_key', '')
+
+            if not messages:
+                # Simple mode: message + optional code
+                message = data.get('message', '').strip()
+                code = data.get('code', '')
+                if not message:
+                    self.send_json({'success': False, 'error': 'Message required'}, 400)
+                    return
+                user_msg = f'Code:\n```python\n{code}\n```\n\nQuestion: {message}' if code else message
+                messages = [
+                    {'role': 'system', 'content': MYANAI_SYSTEM_PROMPT},
+                    {'role': 'user', 'content': user_msg},
+                ]
+
+            # Ensure system prompt
+            if not messages or messages[0].get('role') != 'system':
+                messages.insert(0, {'role': 'system', 'content': MYANAI_SYSTEM_PROMPT})
+
+            response = invoke_llm(messages, api_key=api_key_override or None)
+            reply = extract_response_text(response)
+            model = response.get('model', 'unknown')
+
+            self.send_json({
+                'success': True,
+                'response': reply,
+                'model': model,
+                'agent': 'manager',
+                'timestamp': datetime.now().isoformat(),
+            })
+        except ValueError as e:
+            self.send_json({'success': False, 'error': f'AI config error: {e}'})
+        except RuntimeError as e:
+            self.send_json({'success': False, 'error': str(e)})
+        except Exception as e:
+            print(f'  [AI] Chat error: {e}')
+            self.send_json({'success': False, 'error': f'AI error: {e}'})
+
+    # ─── API: Code Execute (isolated subprocess) ─────────────────────────
+    def handle_code_execute(self, data):
+        """Execute Python code in isolated subprocess
+        Ported from ai_colab_platform/server/pythonExecutor.ts"""
+        code = data.get('code', '').strip()
+        if not code:
+            self.send_json({'output': '', 'status': 0, 'executionTime': 0})
+            return
+
+        try:
+            from code_executor import execute_python_code
+
+            timeout = data.get('timeout', 60)
+            if timeout > 120:
+                timeout = 120
+            elif timeout < 5:
+                timeout = 5
+
+            result = execute_python_code(code, timeout=timeout)
+            self.send_json(result)
+        except Exception as e:
+            self.send_json({
+                'status': 'error',
+                'output': '',
+                'error': f'[ERR] Code execution failed: {e}',
+                'executionTime': 0,
+            })
+
+    # ─── API: Code Execute with Visualization ───────────────────────────
+    def handle_code_execute_viz(self, data):
+        """Execute Python code with matplotlib visualization support
+        Returns base64-encoded images from plots"""
+        code = data.get('code', '').strip()
+        if not code:
+            self.send_json({'output': '', 'status': 0, 'images': [], 'executionTime': 0})
+            return
+
+        try:
+            from code_executor import execute_python_with_visualization
+
+            timeout = data.get('timeout', 60)
+            if timeout > 120:
+                timeout = 120
+            elif timeout < 5:
+                timeout = 5
+
+            result = execute_python_with_visualization(code, timeout=timeout)
+            self.send_json(result)
+        except Exception as e:
+            self.send_json({
+                'status': 'error',
+                'output': '',
+                'error': f'[ERR] Code execution failed: {e}',
+                'images': [],
+                'executionTime': 0,
+            })
+
+    # ─── API: TiDB Database Endpoints ────────────────────────────────────
+    def handle_db_health(self):
+        """Check TiDB database health"""
+        try:
+            from db_tidb import db_health
+            health = db_health()
+            self.send_json(health)
+        except Exception as e:
+            self.send_json({'connected': False, 'error': str(e)})
+
+    def handle_db_list_users(self):
+        """List all users from TiDB"""
+        try:
+            from db_tidb import list_users
+            users = list_users()
+            self.send_json({'users': users, 'total': len(users)})
+        except Exception as e:
+            self.send_json({'error': str(e), 'users': []})
+
+    def handle_db_query(self, data):
+        """Execute a safe read-only query on TiDB"""
+        try:
+            from db_tidb import get_connection, release_connection
+
+            query = data.get('query', '').strip()
+            if not query:
+                self.send_json({'error': 'Query required'}, 400)
+                return
+
+            # Safety: only allow SELECT queries
+            query_upper = query.upper().strip()
+            if not query_upper.startswith('SELECT'):
+                self.send_json({'error': 'Only SELECT queries allowed'}, 400)
+                return
+
+            conn = get_connection()
+            if not conn:
+                self.send_json({'error': 'Database not connected'})
+                return
+
+            try:
+                cursor = conn.cursor(pymysql.cursors.DictCursor)
+                cursor.execute(query, timeout=10)
+                rows = cursor.fetchall()
+                # Convert datetime objects to strings
+                for row in rows:
+                    for key, val in row.items():
+                        if hasattr(val, 'isoformat'):
+                            row[key] = val.isoformat()
+                self.send_json({'rows': rows, 'total': len(rows)})
+            finally:
+                release_connection(conn)
+        except Exception as e:
+            self.send_json({'error': f'Query error: {e}'})
+
+    def handle_db_endpoint(self, data, path):
+        """Handle /api/db/* CRUD endpoints
+        Mapped from ai_colab_platform/server/routers.ts"""
+        try:
+            from db_tidb import (
+                get_user_notebooks, get_notebook_by_id, create_notebook,
+                update_notebook, delete_notebook, get_notebook_cells,
+                create_cell, update_cell, delete_cell, reorder_cells,
+                create_execution_record, get_cell_execution_history,
+                create_ai_conversation,
+            )
+
+            parts = path.split('/')
+            if len(parts) < 4:
+                self.send_json({'error': 'Invalid endpoint'}, 404)
+                return
+
+            resource = parts[3]  # 'notebooks', 'cells', 'execution', 'ai', 'users'
+
+            if resource == 'notebooks':
+                action = data.get('action', parts[4] if len(parts) > 4 else '')
+                if action == 'list' or (not action and self.command == 'GET'):
+                    user_id = data.get('userId', 1)
+                    notebooks = get_user_notebooks(user_id)
+                    self.send_json({'notebooks': notebooks, 'total': len(notebooks)})
+                elif action == 'get':
+                    nb = get_notebook_by_id(data.get('notebookId', 0))
+                    if nb:
+                        self.send_json({'notebook': nb})
+                    else:
+                        self.send_json({'error': 'Notebook not found'}, 404)
+                elif action == 'create':
+                    title = data.get('title', 'Untitled')
+                    desc = data.get('description', '')
+                    nb = create_notebook(data.get('userId', 1), title, desc or None)
+                    self.send_json({'notebook': nb, 'success': nb is not None})
+                elif action == 'update':
+                    nb = update_notebook(data.get('notebookId', 0), data.get('title'), data.get('description'))
+                    self.send_json({'notebook': nb, 'success': nb is not None})
+                elif action == 'delete':
+                    ok = delete_notebook(data.get('notebookId', 0))
+                    self.send_json({'success': ok})
+                else:
+                    self.send_json({'error': f'Unknown notebook action: {action}'}, 400)
+
+            elif resource == 'cells':
+                action = data.get('action', '')
+                if action == 'list':
+                    cells = get_notebook_cells(data.get('notebookId', 0))
+                    self.send_json({'cells': cells, 'total': len(cells)})
+                elif action == 'create':
+                    cell = create_cell(
+                        data.get('notebookId', 0),
+                        data.get('type', 'code'),
+                        data.get('content', ''),
+                        data.get('order', 0),
+                    )
+                    self.send_json({'cell': cell, 'success': cell is not None})
+                elif action == 'update':
+                    cell = update_cell(data.get('cellId', 0), data.get('content'))
+                    self.send_json({'cell': cell, 'success': cell is not None})
+                elif action == 'delete':
+                    ok = delete_cell(data.get('cellId', 0))
+                    self.send_json({'success': ok})
+                elif action == 'reorder':
+                    ok = reorder_cells(data.get('notebookId', 0), data.get('cellIds', []))
+                    self.send_json({'success': ok})
+                else:
+                    self.send_json({'error': f'Unknown cell action: {action}'}, 400)
+
+            elif resource == 'execution':
+                action = data.get('action', 'execute')
+                if action == 'execute':
+                    from code_executor import execute_python_with_visualization
+                    code = data.get('code', '')
+                    result = execute_python_with_visualization(code)
+                    record = create_execution_record(
+                        data.get('cellId', 0), data.get('notebookId', 0),
+                        code, result['status'], result['output'], result['error'],
+                        result.get('executionTime', 0),
+                    )
+                    self.send_json({**result, 'recordId': record.get('id') if record else None})
+                elif action == 'history':
+                    history = get_cell_execution_history(data.get('cellId', 0))
+                    self.send_json({'history': history})
+                else:
+                    self.send_json({'error': f'Unknown execution action: {action}'}, 400)
+
+            elif resource == 'ai':
+                action = data.get('action', 'chat')
+                if action == 'chat':
+                    from ai_llm import chat_with_history
+                    message = data.get('message', '')
+                    history = data.get('history', [])
+                    reply = chat_with_history(history + [{'role': 'user', 'content': message}])
+                    conv = create_ai_conversation(
+                        data.get('notebookId', 0), data.get('type', 'completion'),
+                        message, reply, data.get('cellId'),
+                    )
+                    self.send_json({
+                        'response': reply,
+                        'conversationId': conv.get('id') if conv else None,
+                    })
+                elif action == 'generate':
+                    from ai_llm import invoke_llm, extract_response_text, CODE_GENERATION_PROMPT
+                    query = data.get('query', '')
+                    response = invoke_llm([
+                        {'role': 'system', 'content': CODE_GENERATION_PROMPT},
+                        {'role': 'user', 'content': f'Generate Python code for: {query}'},
+                    ])
+                    reply = extract_response_text(response)
+                    self.send_json({'response': reply})
+                elif action == 'explain':
+                    from ai_llm import invoke_llm, extract_response_text, CODE_EXPERT_PROMPT
+                    error = data.get('error', '')
+                    code = data.get('code', '')
+                    msg = f'Code:\n```python\n{code}\n```\n\nError: {error}' if code else f'Error: {error}'
+                    response = invoke_llm([
+                        {'role': 'system', 'content': CODE_EXPERT_PROMPT},
+                        {'role': 'user', 'content': f'Explain this error and suggest a fix:\n\n{msg}'},
+                    ])
+                    reply = extract_response_text(response)
+                    self.send_json({'explanation': reply})
+                else:
+                    self.send_json({'error': f'Unknown AI action: {action}'}, 400)
+
+            else:
+                self.send_json({'error': f'Unknown resource: {resource}'}, 404)
+
+        except Exception as e:
+            self.send_json({'error': f'DB error: {e}'})
+
+    # ─── API: Heartbeat (for MyanAI frontend) ───────────────────────────
+    def handle_heartbeat(self):
+        """Heartbeat endpoint for MyanAI frontend status polling
+        Mapped from openclaw's heartbeat system"""
+        try:
+            # Check AI availability
+            ai_available = bool(os.environ.get('FORGE_API_KEY'))
+            ai_model = os.environ.get('FORGE_MODEL', 'gemini-2.5-flash')
+
+            # Check DB availability
+            from db_tidb import db_health
+            db_health_data = db_health()
+            db_connected = db_health_data.get('connected', False)
+
+            self.send_json({
+                'status': 'online',
+                'system': {
+                    'models_loaded': 1 if ai_available else 0,
+                    'version': VERSION,
+                },
+                'agents': {
+                    'manager': {'status': 'ready' if ai_available else 'offline', 'model': ai_model if ai_available else 'N/A'},
+                    'worker': {'status': 'ready' if ai_available else 'offline', 'model': 'code-executor'},
+                },
+                'active_tasks': [],
+                'database': {'connected': db_connected, 'host': db_health_data.get('host', 'N/A')},
+                'timestamp': datetime.now().isoformat(),
+            })
+        except Exception as e:
+            self.send_json({
+                'status': 'online',
+                'system': {'models_loaded': 0, 'version': VERSION},
+                'agents': {'manager': {'status': 'offline', 'model': 'N/A'}, 'worker': {'status': 'offline', 'model': 'N/A'}},
+                'active_tasks': [],
+                'error': str(e),
+            })
+
 
 # ─── Server Runner ─────────────────────────────────────────────────────────────
 def find_port(port):
@@ -906,6 +1267,24 @@ def find_port(port):
 _server_start_time = time.time()
 PID_FILE = BASE_DIR / '.myanos.pid'
 LOG_FILE = BASE_DIR / '.myanos.log'
+_db_health_cache = {'connected': False, 'host': 'N/A'}
+
+
+def _init_db():
+    """Initialize TiDB connection and create tables"""
+    global _db_health_cache
+    try:
+        from db_tidb import db_init, db_health
+        print('  [DB] Connecting to TiDB Cloud...')
+        db_init()
+        _db_health_cache = db_health()
+        if _db_health_cache.get('connected'):
+            print(f'  [DB] TiDB connected: {_db_health_cache.get("host")}')
+        else:
+            print(f'  [DB] TiDB not available: {_db_health_cache.get("error", "unknown")}')
+    except Exception as e:
+        print(f'  [DB] Init failed: {e}')
+        _db_health_cache = {'connected': False, 'error': str(e)}
 
 
 def main():
@@ -930,6 +1309,9 @@ def main():
     # Initialize security
     api_key = init_api_key()
     pw_hash = init_password()
+
+    # Initialize TiDB database
+    _init_db()
 
     # Build packages if dist/ is empty
     dist_dir = BASE_DIR / 'dist'

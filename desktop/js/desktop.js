@@ -3179,18 +3179,20 @@ class MyanosDesktop {
     renderMyanAi(body) {
         const self = this;
         const BACKEND = self._settings.backendUrl || 'https://meonnmi0ps-myanos-os.hf.space';
+        const LOCAL_API = '';  // Use local /api/ endpoints
 
         body.innerHTML = `<div style="display:flex;flex-direction:column;height:100%;">
             <!-- Header -->
             <div style="padding:10px 14px;background:rgba(30,32,50,0.5);border-bottom:1px solid rgba(255,255,255,0.06);display:flex;align-items:center;gap:10px;">
                 <span style="font-size:20px;">🤖</span>
                 <div style="flex:1;min-width:0;">
-                    <div style="font-size:14px;color:#c0caf5;font-weight:600;">MyanAi — Multi-Agent AI</div>
-                    <div style="font-size:10px;color:#565f89;" id="ai-agent-info">Manager: qwen2.5:7b | Worker: burmese-coder-4b</div>
+                    <div style="font-size:14px;color:#c0caf5;font-weight:600;">MyanAi — Multi-Agent AI v5.0</div>
+                    <div style="font-size:10px;color:#565f89;" id="ai-agent-info">Manager: Gemini 2.5 Flash | Worker: Python Executor</div>
                 </div>
                 <div id="ai-agent-badges" style="display:flex;gap:4px;">
                     <span id="ai-badge-manager" style="padding:2px 8px;background:rgba(122,162,247,0.1);border-radius:8px;font-size:10px;color:#565f89;" title="Manager Agent">M</span>
                     <span id="ai-badge-worker" style="padding:2px 8px;background:rgba(187,154,247,0.1);border-radius:8px;font-size:10px;color:#565f89;" title="Worker Agent">W</span>
+                    <span id="ai-badge-db" style="padding:2px 8px;background:rgba(158,206,106,0.1);border-radius:8px;font-size:10px;color:#565f89;" title="TiDB Database">DB</span>
                 </div>
                 <div id="ai-status" style="padding:3px 10px;background:rgba(122,162,247,0.1);border-radius:10px;font-size:11px;color:#565f89;">● Connecting...</div>
             </div>
@@ -3257,12 +3259,13 @@ class MyanosDesktop {
             }
         };
 
-        addMsg('ai', 'မင်္ဂလာပါ! 🇲🇲\nMyanAi Multi-Agent System ကocom တင်ပါတယ်။\n\n🤖 Manager: qwen2.5:7b (Task planning)\n⚡ Worker: burmese-coder-4b (Myanmar Code)\n\nမြန်မာ / English နှစ်ခုလုံး ပြောနိုင်ပါတယ်။');
+        addMsg('ai', 'မင်္ဂလာပါ! 🇲🇲\nMyanAi Multi-Agent System v5.0 ကocom တင်ပါတယ်။\n\n🤖 Manager: Gemini 2.5 Flash (via forge.manus.im)\n⚡ Worker: Python Code Executor (isolated subprocess)\n🗄️ Database: TiDB Cloud (Manus.im)\n\nမြန်မာ / English နှစ်ခုလုံး ပြောနိုင်ပါတယ်။');
 
-        // Heartbeat polling
+        // Heartbeat polling — check both local API and remote backend
         const heartbeatInterval = setInterval(async () => {
             try {
-                const res = await fetch(BACKEND + '/api/heartbeat');
+                // Check local heartbeat first
+                const res = await fetch('/api/heartbeat');
                 const hb = await res.json();
                 const dot = document.getElementById('hb-dot');
                 const txt = document.getElementById('hb-text');
@@ -3270,13 +3273,15 @@ class MyanosDesktop {
                 const tasks = document.getElementById('hb-tasks');
                 const mBadge = document.getElementById('ai-badge-manager');
                 const wBadge = document.getElementById('ai-badge-worker');
+                const dbBadge = document.getElementById('ai-badge-db');
                 const status = document.getElementById('ai-status');
                 if (dot) dot.style.color = '#9ece6a';
                 if (txt) txt.textContent = 'Server: Online';
                 if (models) models.textContent = (hb.system?.models_loaded || 0) + ' models';
                 if (tasks) tasks.textContent = 'Tasks: ' + (hb.active_tasks?.length || 0);
-                if (mBadge) { mBadge.style.color = hb.agents?.manager?.status === 'ready' ? '#7aa2f7' : '#f7768e'; mBadge.title = 'Manager: ' + (hb.agents?.manager?.status || 'offline'); }
-                if (wBadge) { wBadge.style.color = hb.agents?.worker?.status === 'ready' ? '#bb9af7' : '#f7768e'; wBadge.title = 'Worker: ' + (hb.agents?.worker?.status || 'offline'); }
+                if (mBadge) { mBadge.style.color = hb.agents?.manager?.status === 'ready' ? '#7aa2f7' : '#f7768e'; mBadge.title = 'Manager: ' + (hb.agents?.manager?.model || 'offline'); }
+                if (wBadge) { wBadge.style.color = hb.agents?.worker?.status === 'ready' ? '#bb9af7' : '#f7768e'; wBadge.title = 'Worker: ' + (hb.agents?.worker?.model || 'offline'); }
+                if (dbBadge) { dbBadge.style.color = hb.database?.connected ? '#9ece6a' : '#565f89'; dbBadge.title = 'DB: ' + (hb.database?.connected ? 'TiDB Online' : 'Offline'); }
                 if (status) { status.textContent = '● Online'; status.style.color = '#9ece6a'; }
             } catch(e) {
                 const dot = document.getElementById('hb-dot');
@@ -3289,7 +3294,7 @@ class MyanosDesktop {
         }, 5000);
 
         // Initial heartbeat
-        fetch(BACKEND + '/api/heartbeat').then(r=>r.json()).then(hb => {
+        fetch('/api/heartbeat').then(r=>r.json()).then(hb => {
             const info = document.getElementById('ai-agent-info');
             if (info) info.textContent = 'Manager: ' + (hb.agents?.manager?.model || 'N/A') + ' | Worker: ' + (hb.agents?.worker?.model || 'N/A');
         }).catch(() => {});
@@ -3303,10 +3308,11 @@ class MyanosDesktop {
             showProgress(true, 'Sending to AI...', 10);
 
             try {
-                const res = await fetch(BACKEND + '/api/ai-chat', {
+                // Use LOCAL /api/ai-chat endpoint (server.py v5.0+)
+                const res = await fetch('/api/ai-chat', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({messages: conversationHistory, backend: 'auto'})
+                    body: JSON.stringify({messages: conversationHistory, backend: 'local'})
                 });
                 const data = await res.json();
                 showProgress(false);
@@ -3322,7 +3328,7 @@ class MyanosDesktop {
                 }
             } catch(e) {
                 showProgress(false);
-                addMsg('ai', '⚠️ Cannot connect to server.\n\nBackend: ' + BACKEND + '\nError: ' + e.message + '\n\nCheck your internet connection or Settings > Network.');
+                addMsg('ai', '⚠️ Cannot connect to local AI server.\n\nError: ' + e.message + '\n\nTip: Set FORGE_API_KEY environment variable for AI chat.');
             }
         };
 
