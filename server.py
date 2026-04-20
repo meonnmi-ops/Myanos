@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Myanos Web OS — Server v4.3.0
+Myanos Web OS — Server v5.1.0
 Production-Ready HTTP Server with Security Layer
 - API Key Authentication (X-API-Key header)
 - Rate Limiting (30 req/min/IP)
 - Command Safety (blocks rm -rf /, mkfs, fork bombs)
 - SHA-256 Password Hashing
 - Real System Metrics (psutil + nvidia-smi)
+- AI Chat (Ollama + HuggingFace + Groq — free/local)
+- Code Execution (isolated subprocess + matplotlib viz)
+- TiDB Cloud Database (CRUD notebooks/cells)
 
 Usage: python3 server.py [port]
 Default port: 8080
@@ -33,7 +36,7 @@ from datetime import datetime
 from collections import defaultdict
 from threading import Thread
 import atexit
-import pymysql  # For TiDB connection
+# pymysql imported lazily inside db_tidb.py (not at top-level to prevent crash if unavailable)
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
@@ -1070,6 +1073,7 @@ class MyanosHandler(SimpleHTTPRequestHandler):
                 return
 
             try:
+                import pymysql
                 cursor = conn.cursor(pymysql.cursors.DictCursor)
                 cursor.execute(query, timeout=10)
                 rows = cursor.fetchall()

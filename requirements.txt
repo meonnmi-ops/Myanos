@@ -9,3 +9,7 @@ pymysql>=1.1.0
 
 # AI/LLM (local Ollama integration)
 ollama>=0.4.0
+
+# Code execution visualization (matplotlib charts/graphs)
+matplotlib>=3.5.0
+numpy>=1.21.0
