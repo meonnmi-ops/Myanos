@@ -1197,8 +1197,8 @@ Author: Aung MoeOo (MWD) | 127 keywords
 
 {C.Y}Keywords (127):{C.NC}
   ပုံနှိပ်(print) တိုက်(if) တိုက်ရွေး(else) ပျက်(break)
-  ဆက်လုပ်(continue) ခန့်(return) လုပ်(function) ဖြတ်(class)
-  သို့(while) အပြည့်(end) ချိန်း(integer) သော်(float)
+  ဆက်လုပ်(continue) ပြန်ပေး(return) လုပ်ငန်း(function) ဖြတ်(class)
+  ကြာအောင်(while) ပြည့်အောင်(end) ကိန်း(int) လော့ဂရစ်သမ်(float)
   စာ(string) မှန်(true) မှာ(false) ကိုယ်(self)...""", 0)
 
         code = ' '.join(args)

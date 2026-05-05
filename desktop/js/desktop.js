@@ -3259,7 +3259,7 @@ class MyanosDesktop {
             }
         };
 
-        addMsg('ai', 'မင်္ဂလာပါ! 🇲🇲\nMyanAi Multi-Agent System v5.0 ကocom တင်ပါတယ်။\n\n🤖 Manager: Gemini 2.5 Flash (via forge.manus.im)\n⚡ Worker: Python Code Executor (isolated subprocess)\n🗄️ Database: TiDB Cloud (Manus.im)\n\nမြန်မာ / English နှစ်ခုလုံး ပြောနိုင်ပါတယ်။');
+        addMsg('ai', 'မင်္ဂလာပါ! 🇲🇲\nMyanAi Multi-Agent System v5.0 ကို compile တင်ပါတယ်။\n\n🤖 Manager: Gemini 2.5 Flash (via forge.manus.im)\n⚡ Worker: Python Code Executor (isolated subprocess)\n🗄️ Database: TiDB Cloud (Manus.im)\n\nမြန်မာ / English နှစ်ခုလုံး ပြောနိုင်ပါတယ်။');
 
         // Heartbeat polling — check both local API and remote backend
         const heartbeatInterval = setInterval(async () => {
